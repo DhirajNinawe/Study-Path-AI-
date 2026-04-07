@@ -270,11 +270,11 @@ export function LiveVoiceMode({ onClose }: LiveVoiceModeProps) {
       })
 
       if (!response.ok) {
-        console.warn("[Voice] TTS API returned", response.status, "— falling back to silent wait")
-        // Fallback: wait 2s, then loop back to listening
-        setTimeout(() => {
-          if (mountedRef.current && sessionRef.current) startListening()
-        }, 2000)
+        console.warn("[Voice] TTS API returned", response.status)
+        if (mountedRef.current && sessionRef.current) {
+          setError(`TTS failed: ${response.status}`)
+          setVoiceState("error")
+        }
         return
       }
 
@@ -286,12 +286,12 @@ export function LiveVoiceMode({ onClose }: LiveVoiceModeProps) {
       // Store ref so we can stop it on exit
       currentAudioRef.current = audio
 
-      // ─── THE LOOP: when audio finishes, go back to Listening ───
+      // End this turn in idle mode; user must explicitly tap to speak again.
       audio.onended = () => {
         URL.revokeObjectURL(audioUrl)
         currentAudioRef.current = null
         if (mountedRef.current && sessionRef.current) {
-          setTimeout(() => startListening(), 300)
+          setVoiceState("idle")
         }
       }
 
@@ -299,9 +299,10 @@ export function LiveVoiceMode({ onClose }: LiveVoiceModeProps) {
         console.warn("[Voice] Audio element playback error")
         URL.revokeObjectURL(audioUrl)
         currentAudioRef.current = null
-        // Graceful recovery
+        // Do not force idle here; idle reset is reserved for onended only.
         if (mountedRef.current && sessionRef.current) {
-          setTimeout(() => startListening(), 500)
+          setError("Audio playback error")
+          setVoiceState("error")
         }
       }
 
@@ -310,12 +311,13 @@ export function LiveVoiceMode({ onClose }: LiveVoiceModeProps) {
     } catch (err: any) {
       console.warn("[Voice] TTS/playback failed:", err?.message || err)
       currentAudioRef.current = null
-      // Graceful recovery — never crash, just go back to listening
+      // Do not force idle here; idle reset is reserved for onended only.
       if (mountedRef.current && sessionRef.current) {
-        setTimeout(() => startListening(), 1000)
+        setError(err?.message || "TTS/playback failed")
+        setVoiceState("error")
       }
     }
-  }, [startListening])
+  }, [])
 
   /* ════════════════════════════════════════════════════════════
      SESSION CONTROL
@@ -431,7 +433,12 @@ export function LiveVoiceMode({ onClose }: LiveVoiceModeProps) {
             <button
               onClick={() => {
                 if (voiceState === "idle") {
-                  startSession()
+                  if (sessionRef.current) {
+                    setError(null)
+                    startListening()
+                  } else {
+                    startSession()
+                  }
                 } else if (voiceState === "listening") {
                   // Force-send what we have
                   const text = transcript.trim()

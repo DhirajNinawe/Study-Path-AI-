@@ -9,7 +9,7 @@ import { NextRequest, NextResponse } from "next/server";
 // ElevenLabs voice ID for an Indian-accent, natural-sounding voice.
 // "Rachel" (21m00Tcm4TlvDq8ikWAM) is a warm, clear multilingual voice.
 // You can swap this for any voice ID from your ElevenLabs account.
-const VOICE_ID = "21m00Tcm4TlvDq8ikWAM";
+const VOICE_ID = "IKne3meq5aSn9XLyUdCD";
 const ELEVENLABS_MODEL = "eleven_multilingual_v2";
 
 export async function POST(request: NextRequest) {
