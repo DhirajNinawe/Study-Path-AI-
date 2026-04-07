@@ -62,7 +62,7 @@ You are the student's personal mentor, tutor, and cheerleader — all in one. Ma
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { messages, userProgressContext } = body;
+    const { messages, userProgressContext, contextText } = body;
 
     if (!messages || !Array.isArray(messages)) {
       return NextResponse.json(
@@ -71,8 +71,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Build context-aware system prompt with user's progress
+    // Build context-aware system prompt with optional document/video context
     let contextualSystemPrompt = SYSTEM_PROMPT;
+
+    // ── Inject document/video context (highest priority) ────────────────────
+    if (contextText && typeof contextText === "string" && contextText.trim().length > 0) {
+      contextualSystemPrompt += `\n\n## 📄 PRIORITY CONTEXT: USER-PROVIDED DOCUMENT OR VIDEO\nThe user has attached the following content (from a PDF or YouTube video). You MUST:\n1. Prioritize answering questions using this content above all else\n2. Quote directly from it when relevant\n3. Proactively reference it in your answers\n4. If a question is unrelated to this content, answer from your general knowledge but mention the context\n\n---BEGIN ATTACHED CONTEXT---\n${contextText.trim().slice(0, 5000)}\n---END ATTACHED CONTEXT---`;
+    }
+
     if (userProgressContext) {
       contextualSystemPrompt += `\n\n## CURRENT USER PROGRESS DATA (USE THIS FOR PERSONALIZATION)
 - **Subject**: ${userProgressContext.subject || "Not set"}

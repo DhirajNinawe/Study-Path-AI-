@@ -1,7 +1,10 @@
 "use client"
 
+import { useEffect } from "react"
+import { useRouter } from "next/navigation"
 import { AppProvider, useApp } from "@/lib/app-context"
-import { LandingPage } from "@/components/landing-page"
+import { useAuth } from "@/lib/auth-context"
+import { HeroLanding } from "@/components/hero-landing"
 import { SubjectSelection } from "@/components/subject-selection"
 import { Dashboard } from "@/components/dashboard"
 import { DiagnosticTest } from "@/components/diagnostic-test"
@@ -12,13 +15,23 @@ import { TopicReadinessCheck } from "@/components/topic-readiness-check"
 import { AIAssistant } from "@/components/ai-assistant"
 import { AppShell } from "@/components/app-shell"
 import { ErrorBoundary } from "@/components/error-boundary"
-import { Brain } from "lucide-react"
+import { Brain, Loader2 } from "lucide-react"
 
 function AppContent() {
   const { currentPage, isHydrated } = useApp()
+  const { user, loading, profileComplete, isNewUser } = useAuth()
+  const router = useRouter()
 
-  // Show loading state during hydration to prevent mismatches
-  if (!isHydrated) {
+  // Redirect new/incomplete-profile users to setup
+  useEffect(() => {
+    if (loading) return
+    if (user && (!profileComplete || isNewUser)) {
+      router.push("/profile-setup")
+    }
+  }, [user, loading, profileComplete, isNewUser, router])
+
+  // Global loading state
+  if (!isHydrated || loading) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="text-center">
@@ -31,16 +44,28 @@ function AppContent() {
     )
   }
 
-  // Landing and selection pages don't need the app shell
-  if (currentPage === "landing") {
-    return <LandingPage />
+  // ── Unauthenticated: show the new hero landing page ─────────
+  if (!user) {
+    return <HeroLanding />
   }
 
-  if (currentPage === "select") {
+  // ── Authenticated but profile incomplete: spinning redirect ──
+  if (!profileComplete || isNewUser) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <Loader2 className="w-8 h-8 text-primary animate-spin" />
+          <p className="text-sm text-muted-foreground">Setting up your profile…</p>
+        </div>
+      </div>
+    )
+  }
+
+  // ── Authenticated + profile complete: render app ─────────────
+  if (currentPage === "landing" || currentPage === "select") {
     return <SubjectSelection />
   }
 
-  // All other pages use the app shell with navigation
   return (
     <AppShell>
       {currentPage === "dashboard" && <Dashboard />}

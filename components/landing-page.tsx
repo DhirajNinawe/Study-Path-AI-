@@ -2,10 +2,13 @@
 
 import { Button } from "@/components/ui/button"
 import { useApp } from "@/lib/app-context"
-import { BookOpen, Brain, Target, Zap, ChevronRight, Sparkles, BarChart3, Clock } from "lucide-react"
+import { useAuth } from "@/lib/auth-context"
+import { BookOpen, Brain, Target, Zap, ChevronRight, Sparkles, BarChart3, Clock, LogIn, LogOut } from "lucide-react"
+import Image from "next/image"
 
 export function LandingPage() {
   const { setCurrentPage } = useApp()
+  const { user, signInWithGoogle, signOut, loading } = useAuth()
 
   return (
     <div className="min-h-screen bg-background overflow-hidden">
@@ -26,13 +29,70 @@ export function LandingPage() {
             </div>
             <span className="text-xl font-bold text-foreground tracking-tight">StudyPath AI</span>
           </div>
-          <Button 
-            variant="outline" 
-            className="border-border/50 bg-card/50 backdrop-blur-sm hover:bg-card hover:border-primary/50 transition-all duration-300"
-            onClick={() => setCurrentPage("select")}
-          >
-            Get Started
-          </Button>
+
+          {/* Auth Nav Controls */}
+          <div className="flex items-center gap-3">
+            {user ? (
+              <>
+                {/* User avatar + name */}
+                <div className="hidden sm:flex items-center gap-2 bg-card/60 border border-border/50 rounded-full px-3 py-1.5 backdrop-blur-sm">
+                  {user.photoURL ? (
+                    <Image
+                      src={user.photoURL}
+                      alt={user.displayName || "User"}
+                      width={24}
+                      height={24}
+                      className="w-6 h-6 rounded-full"
+                    />
+                  ) : (
+                    <div className="w-6 h-6 bg-primary rounded-full flex items-center justify-center text-primary-foreground text-xs font-bold">
+                      {(user.displayName || user.email || "U")[0].toUpperCase()}
+                    </div>
+                  )}
+                  <span className="text-xs font-medium text-foreground max-w-[120px] truncate">
+                    {user.displayName || user.email}
+                  </span>
+                </div>
+                <Button
+                  variant="default"
+                  className="bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 text-primary-foreground transition-all duration-300"
+                  onClick={() => setCurrentPage("dashboard")}
+                >
+                  Dashboard
+                  <ChevronRight className="w-4 h-4 ml-1" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-muted-foreground hover:text-foreground"
+                  onClick={() => signOut()}
+                  title="Sign out"
+                >
+                  <LogOut className="w-4 h-4" />
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button
+                  variant="outline"
+                  className="border-border/50 bg-card/50 backdrop-blur-sm hover:bg-card hover:border-primary/50 transition-all duration-300 gap-2"
+                  onClick={signInWithGoogle}
+                  disabled={loading}
+                  id="landing-signin-btn"
+                >
+                  <LogIn className="w-4 h-4" />
+                  Sign in with Google
+                </Button>
+                <Button
+                  className="bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 text-primary-foreground transition-all duration-300"
+                  onClick={signInWithGoogle}
+                  disabled={loading}
+                >
+                  Get Started
+                </Button>
+              </>
+            )}
+          </div>
         </nav>
 
         {/* Hero Content */}
@@ -54,21 +114,27 @@ export function LandingPage() {
           </p>
 
           <div className="flex flex-col sm:flex-row gap-4 mt-12">
-            <Button 
-              size="lg" 
+            <Button
+              size="lg"
               className="bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 text-primary-foreground px-8 h-12 text-base shadow-lg glow transition-all duration-300"
-              onClick={() => setCurrentPage("select")}
+              onClick={user ? () => setCurrentPage("dashboard") : signInWithGoogle}
+              disabled={loading}
             >
-              Start Learning Now
+              {user ? "Go to Dashboard" : "Start Learning Now"}
               <ChevronRight className="w-5 h-5 ml-2" />
             </Button>
-            <Button 
-              size="lg" 
-              variant="outline"
-              className="border-border/50 bg-card/30 backdrop-blur-sm hover:bg-card/50 h-12 text-base"
-            >
-              Watch Demo
-            </Button>
+            {!user && (
+              <Button
+                size="lg"
+                variant="outline"
+                className="border-border/50 bg-card/30 backdrop-blur-sm hover:bg-card/50 h-12 text-base gap-2"
+                onClick={signInWithGoogle}
+                disabled={loading}
+              >
+                <LogIn className="w-4 h-4" />
+                Sign in with Google
+              </Button>
+            )}
           </div>
 
           {/* Stats */}

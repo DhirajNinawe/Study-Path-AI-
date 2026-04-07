@@ -1,6 +1,7 @@
 "use client"
 
 import { useApp } from "@/lib/app-context"
+import { useAuth } from "@/lib/auth-context"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import { 
@@ -17,7 +18,8 @@ import {
   GraduationCap,
   RotateCcw,
   Zap,
-  Target
+  Target,
+  LogOut
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useState } from "react"
@@ -38,6 +40,7 @@ const navItems = [
 
 export function AppShell({ children }: AppShellProps) {
   const { currentPage, setCurrentPage, userProgress, clearAllData } = useApp()
+  const { user, signOut } = useAuth()
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
   const handleReset = () => {
@@ -158,27 +161,44 @@ export function AppShell({ children }: AppShellProps) {
         {/* Footer */}
         <div className="p-4 border-t border-sidebar-border space-y-3">
           <div className="flex items-center gap-3 px-3 py-2.5 bg-sidebar-accent rounded-xl">
-            <div className="w-10 h-10 bg-gradient-to-br from-primary/20 to-accent/20 rounded-xl flex items-center justify-center">
-              <span className="text-sm font-bold text-sidebar-foreground">
-                {userProgress?.subject?.charAt(0) || "S"}
-              </span>
+            <div className="w-9 h-9 bg-gradient-to-br from-primary/20 to-accent/20 rounded-xl flex items-center justify-center flex-shrink-0">
+              {user?.photoURL ? (
+                <img src={user.photoURL} alt="avatar" className="w-9 h-9 rounded-xl object-cover" />
+              ) : (
+                <span className="text-sm font-bold text-sidebar-foreground">
+                  {(user?.displayName || user?.email || "S").charAt(0).toUpperCase()}
+                </span>
+              )}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-sidebar-foreground truncate">Student</p>
+              <p className="text-sm font-medium text-sidebar-foreground truncate">
+                {user?.displayName || "Student"}
+              </p>
               <p className="text-xs text-muted-foreground truncate">
-                {userProgress?.subject || "No subject selected"}
+                {user?.email || userProgress?.subject || "No subject"}
               </p>
             </div>
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="w-full text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-            onClick={handleReset}
-          >
-            <RotateCcw className="w-4 h-4 mr-2" />
-            Reset Progress
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="flex-1 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+              onClick={handleReset}
+            >
+              <RotateCcw className="w-4 h-4 mr-2" />
+              Reset
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="flex-1 text-muted-foreground hover:text-foreground hover:bg-sidebar-accent"
+              onClick={signOut}
+            >
+              <LogOut className="w-4 h-4 mr-2" />
+              Sign Out
+            </Button>
+          </div>
         </div>
       </aside>
 

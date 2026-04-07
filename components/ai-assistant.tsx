@@ -5,6 +5,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { useApp } from "@/lib/app-context"
+import { useAuth } from "@/lib/auth-context"
 import { SUBJECT_TOPICS } from "@/lib/questions"
 import {
   Send,
@@ -19,8 +20,17 @@ import {
   AlertCircle,
   RefreshCw,
   Trash2,
+  Paperclip,
+  Youtube,
+  FileText,
+  X,
+  Link,
+  CheckCircle2,
+  Loader2,
+  AudioWaveform,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { LiveVoiceMode } from "@/components/live-voice-mode"
 
 /* ─────────────────────────────────────────────────────────────
    TYPES
@@ -32,9 +42,9 @@ interface Message {
 
 /* ─────────────────────────────────────────────────────────────
    SPEECH API HELPERS
-   The Web Speech API (SpeechRecognition + SpeechSynthesis) is
-   built into modern browsers — no external SDK needed for STT.
-   For TTS we also use the browser SpeechSynthesis API.
+   STT: Web Speech API (SpeechRecognition) — browser built-in.
+   TTS: ElevenLabs eleven_multilingual_v2 via secure /api/tts
+        route — natural Indian-accent voice for Hindi & English.
 ───────────────────────────────────────────────────────────── */
 declare global {
   interface Window {
@@ -179,6 +189,7 @@ function SuggestedQuestion({ text, onClick }: { text: string; onClick: () => voi
 ───────────────────────────────────────────────────────────── */
 export function AIAssistant() {
   const { chatMessages, addChatMessage, userProgress } = useApp() as any
+  const { user } = useAuth()
 
   // Local state for the input and UI
   const [input, setInput] = useState("")
@@ -187,12 +198,78 @@ export function AIAssistant() {
   const [isListening, setIsListening] = useState(false)
   const [speakingIndex, setSpeakingIndex] = useState<number | null>(null)
   const [micSupported, setMicSupported] = useState(false)
+  const [historyLoaded, setHistoryLoaded] = useState(false)
+  // ── ElevenLabs TTS state ─────────────────────────────────────
+  const [isMuted, setIsMuted] = useState(false)
+  const [isSpeakingTTS, setIsSpeakingTTS] = useState(false)
+  // ── Live Voice Mode ─────────────────────────────────────────
+  const [showVoiceMode, setShowVoiceMode] = useState(false)
+
+  // ── Context-Aware Study state ────────────────────────────────
+  const [contextText, setContextText] = useState<string | null>(null)
+  const [contextLabel, setContextLabel] = useState<string | null>(null)
+  const [isLoadingContext, setIsLoadingContext] = useState(false)
+  const [contextError, setContextError] = useState<string | null>(null)
+  const [showYoutubeInput, setShowYoutubeInput] = useState(false)
+  const [youtubeUrl, setYoutubeUrl] = useState("")
 
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const recognitionRef = useRef<any>(null)
-  const synthRef = useRef<SpeechSynthesis | null>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  /* ── Load chat history from MongoDB on mount ─────── */
+  useEffect(() => {
+    if (!user || historyLoaded) return
+
+    const loadHistory = async () => {
+      try {
+        const res = await fetch(`/api/chat/history?uid=${encodeURIComponent(user.uid)}`)
+        if (!res.ok) return
+        const data = await res.json()
+        const dbMessages: Message[] = data.chatHistory || []
+        if (dbMessages.length > 0) {
+          // Replace local welcome message with DB history
+          // We do this by calling addChatMessage for each DB message
+          // Only load if local state is still just the default welcome
+          if (chatMessages.length <= 1) {
+            dbMessages.forEach((msg: Message) => addChatMessage(msg.role, msg.content))
+          }
+        }
+      } catch (err) {
+        console.warn("[Chat] Could not load history from MongoDB:", err)
+      } finally {
+        setHistoryLoaded(true)
+      }
+    }
+
+    loadHistory()
+  }, [user, historyLoaded, addChatMessage, chatMessages.length])
+
+  /* ── Save messages to MongoDB ─────────────────────── */
+  const saveToDB = useCallback(
+    async (userMsg: string, assistantMsg: string) => {
+      if (!user) return
+      try {
+        await fetch("/api/chat/history", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            uid: user.uid,
+            messages: [
+              { role: "user", content: userMsg },
+              { role: "assistant", content: assistantMsg },
+            ],
+          }),
+        })
+      } catch (err) {
+        console.warn("[Chat] Failed to save to MongoDB:", err)
+      }
+    },
+    [user]
+  )
 
   /* ── Scroll to bottom on new message ─────────────── */
   const scrollToBottom = useCallback(() => {
@@ -208,7 +285,13 @@ export function AIAssistant() {
     if (typeof window !== "undefined") {
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition
       setMicSupported(!!SR)
-      synthRef.current = window.speechSynthesis || null
+      // Pre-create a reusable Audio element for TTS playback
+      audioRef.current = new Audio()
+      audioRef.current.onended = () => setSpeakingIndex(null)
+      audioRef.current.onerror = () => {
+        setSpeakingIndex(null)
+        setIsSpeakingTTS(false)
+      }
     }
   }, [])
 
@@ -262,6 +345,72 @@ export function AIAssistant() {
     return questions.slice(0, 4)
   }
 
+  /* ── ElevenLabs TTS via /api/tts ─────────────────── */
+  const speakWithElevenLabs = useCallback(
+    async (text: string, index: number) => {
+      // Stop current playback if the same message is clicked again
+      if (speakingIndex === index && audioRef.current) {
+        audioRef.current.pause()
+        audioRef.current.src = ""
+        setSpeakingIndex(null)
+        setIsSpeakingTTS(false)
+        return
+      }
+
+      // Stop any currently playing audio
+      if (audioRef.current) {
+        audioRef.current.pause()
+        audioRef.current.src = ""
+      }
+      setSpeakingIndex(null)
+      setIsSpeakingTTS(false)
+
+      if (isMuted) return
+
+      try {
+        setIsSpeakingTTS(true)
+        setSpeakingIndex(index)
+
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        })
+
+        if (!res.ok) {
+          console.warn("[TTS] API returned", res.status, "— skipping audio.")
+          setSpeakingIndex(null)
+          setIsSpeakingTTS(false)
+          return
+        }
+
+        const audioBlob = await res.blob()
+        const audioUrl = URL.createObjectURL(audioBlob)
+
+        if (audioRef.current) {
+          audioRef.current.src = audioUrl
+          audioRef.current.onended = () => {
+            setSpeakingIndex(null)
+            setIsSpeakingTTS(false)
+            URL.revokeObjectURL(audioUrl)
+          }
+          audioRef.current.onerror = () => {
+            setSpeakingIndex(null)
+            setIsSpeakingTTS(false)
+            URL.revokeObjectURL(audioUrl)
+          }
+          await audioRef.current.play()
+        }
+      } catch (err: any) {
+        // Graceful degradation — TTS failure never breaks the chat
+        console.warn("[TTS] Audio playback failed:", err?.message || err)
+        setSpeakingIndex(null)
+        setIsSpeakingTTS(false)
+      }
+    },
+    [speakingIndex, isMuted]
+  )
+
   /* ── Call Groq API via /api/chat ─────────────────── */
   const sendMessage = useCallback(
     async (messageText: string) => {
@@ -288,6 +437,8 @@ export function AIAssistant() {
           body: JSON.stringify({
             messages: history,
             userProgressContext: userProgress || null,
+            // Inject the active context (PDF or YouTube transcript)
+            contextText: contextText || undefined,
           }),
         })
 
@@ -299,6 +450,48 @@ export function AIAssistant() {
         const data = await res.json()
         const reply = data.message || "Sorry, I couldn't generate a response."
         addChatMessage("assistant", reply)
+
+        // Persist both messages to MongoDB asynchronously
+        saveToDB(trimmed, reply)
+
+        // Auto-play TTS for the AI reply (non-blocking, graceful)
+        if (!isMuted) {
+          ;(async () => {
+            try {
+              const audioResponse = await fetch("/api/tts", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text: reply }),
+              })
+              if (!audioResponse.ok) return
+
+              const audioBlob = await audioResponse.blob()
+              const audioUrl = URL.createObjectURL(audioBlob)
+              const audio = new Audio(audioUrl)
+
+              setIsSpeakingTTS(true)
+              setSpeakingIndex(chatMessages.length + 1)
+              audioRef.current = audio
+
+              audio.onended = () => {
+                setSpeakingIndex(null)
+                setIsSpeakingTTS(false)
+                URL.revokeObjectURL(audioUrl)
+              }
+
+              audio.onerror = () => {
+                setSpeakingIndex(null)
+                setIsSpeakingTTS(false)
+                URL.revokeObjectURL(audioUrl)
+              }
+
+              await audio.play()
+            } catch {
+              setSpeakingIndex(null)
+              setIsSpeakingTTS(false)
+            }
+          })()
+        }
       } catch (err: any) {
         const msg = err?.message || "Something went wrong. Please try again."
         setError(msg)
@@ -311,8 +504,69 @@ export function AIAssistant() {
         setTimeout(() => textareaRef.current?.focus(), 100)
       }
     },
-    [chatMessages, userProgress, isLoading, addChatMessage]
+    [chatMessages, userProgress, isLoading, addChatMessage, contextText, saveToDB, isMuted]
   )
+
+  /* ── PDF Upload handler ──────────────────────────── */
+  const handlePdfUpload = useCallback(async (file: File) => {
+    if (!file || file.type !== "application/pdf") {
+      setContextError("Please select a valid PDF file.")
+      return
+    }
+    setIsLoadingContext(true)
+    setContextError(null)
+    setShowYoutubeInput(false)
+    try {
+      const form = new FormData()
+      form.append("file", file)
+      const res = await fetch("/api/context/pdf", { method: "POST", body: form })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || "Failed to parse PDF")
+      setContextText(data.contextText)
+      setContextLabel(`📄 ${file.name}${data.truncated ? " (truncated)" : ""}`)
+      addChatMessage("assistant", `✅ I've read **${file.name}** (${data.pageCount} pages, ${Math.round(data.charCount / 1000)}k chars). Ask me anything about it!`)
+    } catch (err: any) {
+      setContextError(err.message || "Failed to process PDF.")
+    } finally {
+      setIsLoadingContext(false)
+      if (fileInputRef.current) fileInputRef.current.value = ""
+    }
+  }, [addChatMessage])
+
+  /* ── YouTube URL handler ─────────────────────────── */
+  const handleYoutubeSubmit = useCallback(async () => {
+    const url = youtubeUrl.trim()
+    if (!url) return
+    setIsLoadingContext(true)
+    setContextError(null)
+    try {
+      const res = await fetch("/api/context/youtube", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || "Failed to fetch transcript")
+      setContextText(data.contextText)
+      setContextLabel(`🎬 YouTube (${data.language.toUpperCase()}, ${data.segmentCount} segments${data.truncated ? ", truncated" : ""})`)
+      setYoutubeUrl("")
+      setShowYoutubeInput(false)
+      addChatMessage("assistant", `✅ I've loaded the YouTube transcript (${data.segmentCount} segments in ${data.language.toUpperCase()}). Ask me anything about this video!`)
+    } catch (err: any) {
+      setContextError(err.message || "Failed to fetch YouTube transcript.")
+    } finally {
+      setIsLoadingContext(false)
+    }
+  }, [youtubeUrl, addChatMessage])
+
+  /* ── Clear context ───────────────────────────────── */
+  const clearContext = useCallback(() => {
+    setContextText(null)
+    setContextLabel(null)
+    setContextError(null)
+    setShowYoutubeInput(false)
+    setYoutubeUrl("")
+  }, [])
 
   /* ── Keyboard submit ─────────────────────────────── */
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -366,50 +620,14 @@ export function AIAssistant() {
     }
   }, [isListening, startListening, stopListening])
 
-  /* ── Text to Speech (TTS) ─────────────────────────── */
-  const speakMessage = useCallback((text: string, index: number) => {
-    if (!synthRef.current) return
-
-    // Stop if already speaking this message
-    if (speakingIndex === index) {
-      synthRef.current.cancel()
-      setSpeakingIndex(null)
-      return
-    }
-
-    // Stop any current speech
-    synthRef.current.cancel()
-
-    // Strip markdown characters for cleaner speech
-    const cleanText = text
-      .replace(/\*\*/g, "")
-      .replace(/\*/g, "")
-      .replace(/`/g, "")
-      .replace(/#{1,6}\s/g, "")
-      .replace(/\n+/g, ". ")
-
-    const utterance = new SpeechSynthesisUtterance(cleanText)
-    utterance.lang = "en-IN"
-    utterance.rate = 0.9
-    utterance.pitch = 1.0
-    utterance.volume = 1.0
-
-    // Prefer a natural voice if available
-    const voices = synthRef.current.getVoices()
-    const preferred = voices.find(
-      (v) =>
-        v.lang.includes("en-IN") ||
-        v.name.includes("Google") ||
-        v.name.includes("Natural")
-    )
-    if (preferred) utterance.voice = preferred
-
-    utterance.onstart = () => setSpeakingIndex(index)
-    utterance.onend = () => setSpeakingIndex(null)
-    utterance.onerror = () => setSpeakingIndex(null)
-
-    synthRef.current.speak(utterance)
-  }, [speakingIndex])
+  /* ── Text to Speech (TTS) — delegates to ElevenLabs ── */
+  // speakMessage is the public API used by MessageBubble "Listen" buttons.
+  const speakMessage = useCallback(
+    (text: string, index: number) => {
+      speakWithElevenLabs(text, index).catch(() => {})
+    },
+    [speakWithElevenLabs]
+  )
 
   /* ── Clear chat ──────────────────────────────────── */
   const clearChat = useCallback(() => {
@@ -509,20 +727,40 @@ export function AIAssistant() {
             </h1>
             <p className="text-xs text-muted-foreground flex items-center gap-1">
               <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
-              Powered by Groq · Multilingual
+              Powered by Groq · ElevenLabs Voice · Multilingual
             </p>
           </div>
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={clearChat}
-          className="text-muted-foreground hover:text-foreground gap-1.5"
-          title="Clear chat history"
-        >
-          <Trash2 className="w-3.5 h-3.5" />
-          <span className="hidden sm:inline text-xs">Clear</span>
-        </Button>
+        <div className="flex items-center gap-2">
+          {/* Header voice status dot — shows when audio is actively playing */}
+          {isSpeakingTTS && (
+            <div className="flex items-center gap-1.5 px-2.5 py-1 bg-primary/15 border border-primary/30 rounded-full">
+              <span className="w-2 h-2 bg-primary rounded-full animate-pulse" />
+              <span className="text-xs text-primary font-medium hidden sm:inline">Speaking</span>
+            </div>
+          )}
+          {/* ── Enter Voice Mode button ────────────────── */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setShowVoiceMode(true)}
+            className="gap-1.5 border-2 border-cyan-500/40 bg-cyan-500/5 text-cyan-400 hover:bg-cyan-500/15 hover:border-cyan-400/60 hover:text-cyan-300 transition-all shadow-[0_0_10px_rgba(0,210,255,0.1)]"
+            title="Enter Live Voice Mode — hands-free speech-to-speech"
+          >
+            <AudioWaveform className="w-4 h-4" />
+            <span className="hidden sm:inline text-xs font-medium">Voice Mode</span>
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={clearChat}
+            className="text-muted-foreground hover:text-foreground gap-1.5"
+            title="Clear chat history"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline text-xs">Clear</span>
+          </Button>
+        </div>
       </div>
 
       {/* Stats Bar */}
@@ -586,29 +824,209 @@ export function AIAssistant() {
           {/* Error Banner */}
           <ErrorBanner />
 
+          {/* ── Context Status Chip ─────────────────── */}
+          {(contextLabel || contextError || isLoadingContext) && (
+            <div className="pt-2">
+              {isLoadingContext && (
+                <div className="flex items-center gap-2 text-xs text-primary bg-primary/8 border border-primary/20 rounded-lg px-3 py-2">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Processing context...</span>
+                </div>
+              )}
+              {contextLabel && !isLoadingContext && (
+                <div className="flex items-center gap-2 text-xs bg-primary/8 border border-primary/25 rounded-lg px-3 py-2">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-primary flex-shrink-0" />
+                  <span className="text-primary font-medium truncate flex-1">{contextLabel}</span>
+                  <span className="text-muted-foreground hidden sm:inline">· AI is reading this context</span>
+                  <button
+                    onClick={clearContext}
+                    className="ml-auto text-muted-foreground hover:text-destructive flex-shrink-0"
+                    title="Remove context"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+              {contextError && !isLoadingContext && (
+                <div className="flex items-center gap-2 text-xs text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
+                  <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                  <span className="flex-1">{contextError}</span>
+                  <button onClick={() => setContextError(null)} className="ml-auto">
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── YouTube URL Input (toggle) ──────────── */}
+          {showYoutubeInput && (
+            <div className="pt-2">
+              <div className="flex gap-2 items-center bg-muted/40 border border-border/50 rounded-xl px-3 py-2">
+                <Youtube className="w-4 h-4 text-red-500 flex-shrink-0" />
+                <input
+                  type="url"
+                  value={youtubeUrl}
+                  onChange={(e) => setYoutubeUrl(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleYoutubeSubmit()}
+                  placeholder="Paste YouTube URL... (e.g. https://youtu.be/xxxx)"
+                  className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground/60 outline-none"
+                  autoFocus
+                />
+                <button
+                  onClick={handleYoutubeSubmit}
+                  disabled={!youtubeUrl.trim() || isLoadingContext}
+                  className="text-xs px-3 py-1 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-40 transition-all flex-shrink-0"
+                >
+                  Fetch
+                </button>
+                <button onClick={() => { setShowYoutubeInput(false); setYoutubeUrl("") }}>
+                  <X className="w-4 h-4 text-muted-foreground hover:text-foreground" />
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Input Area */}
           <div className="pt-3 border-t border-border/30 mt-2">
-            <div className="flex gap-2 items-end">
-              {/* Mic Button */}
-              {micSupported && (
-                <Button
-                  variant={isListening ? "default" : "outline"}
-                  size="icon"
-                  onClick={toggleMic}
-                  disabled={isLoading}
-                  className={cn(
-                    "flex-shrink-0 h-10 w-10 rounded-xl transition-all",
-                    isListening && "animate-pulse bg-red-500 hover:bg-red-600 border-red-500 text-white shadow-lg shadow-red-500/30"
-                  )}
-                  title={isListening ? "Stop recording" : "Start voice input"}
+            {/* Hidden PDF file input */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/pdf"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0]
+                if (file) handlePdfUpload(file)
+              }}
+            />
+
+            {/* ── ElevenLabs Speaking Indicator ─────────── */}
+            {isSpeakingTTS && (
+              <div className="flex items-center gap-2 mb-2 px-3 py-1.5 bg-primary/10 border border-primary/30 rounded-xl w-fit">
+                {/* Animated audio wave bars */}
+                <div className="flex items-end gap-[3px] h-4">
+                  <span className="w-[3px] bg-primary rounded-full animate-[audioBar_0.8s_ease-in-out_infinite]" style={{ height: "40%", animationDelay: "0ms" }} />
+                  <span className="w-[3px] bg-primary rounded-full animate-[audioBar_0.8s_ease-in-out_infinite]" style={{ height: "100%", animationDelay: "120ms" }} />
+                  <span className="w-[3px] bg-primary rounded-full animate-[audioBar_0.8s_ease-in-out_infinite]" style={{ height: "60%", animationDelay: "240ms" }} />
+                  <span className="w-[3px] bg-primary rounded-full animate-[audioBar_0.8s_ease-in-out_infinite]" style={{ height: "80%", animationDelay: "360ms" }} />
+                  <span className="w-[3px] bg-primary rounded-full animate-[audioBar_0.8s_ease-in-out_infinite]" style={{ height: "40%", animationDelay: "480ms" }} />
+                </div>
+                <span className="text-xs font-medium text-primary">AI Speaking…</span>
+                <button
+                  onClick={() => {
+                    if (audioRef.current) {
+                      audioRef.current.pause()
+                      audioRef.current.src = ""
+                    }
+                    setSpeakingIndex(null)
+                    setIsSpeakingTTS(false)
+                  }}
+                  className="ml-1 text-primary/60 hover:text-primary transition-colors"
+                  title="Stop audio"
                 >
-                  {isListening ? (
-                    <MicOff className="w-4 h-4" />
-                  ) : (
-                    <Mic className="w-4 h-4" />
-                  )}
-                </Button>
-              )}
+                  <VolumeX className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            <div className="flex gap-2 items-end">
+              {/* ── Mic Button — always visible, disabled if not supported ── */}
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={micSupported ? toggleMic : undefined}
+                disabled={!micSupported || isLoading || isLoadingContext}
+                className={cn(
+                  "flex-shrink-0 h-10 w-10 rounded-xl transition-all duration-200",
+                  "border-2 border-border bg-muted/30 text-foreground",
+                  "hover:border-primary/60 hover:bg-primary/10 hover:text-primary",
+                  "disabled:opacity-40 disabled:cursor-not-allowed",
+                  isListening && [
+                    "border-red-500 bg-red-500 text-white",
+                    "mic-glow-active",
+                    "animate-pulse hover:bg-red-600 hover:border-red-600",
+                  ]
+                )}
+                title={!micSupported ? "Microphone not supported in this browser" : isListening ? "Stop recording" : "Start voice input (STT)"}
+              >
+                {isListening ? (
+                  <MicOff className="w-4 h-4" />
+                ) : (
+                  <Mic className="w-4 h-4" />
+                )}
+              </Button>
+
+              {/* ── AI Voice / Mute Toggle — always visible ── */}
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={() => {
+                  if (!isMuted && audioRef.current) {
+                    audioRef.current.pause()
+                    audioRef.current.src = ""
+                    setSpeakingIndex(null)
+                    setIsSpeakingTTS(false)
+                  }
+                  setIsMuted((prev) => !prev)
+                }}
+                className={cn(
+                  "flex-shrink-0 h-10 w-10 rounded-xl transition-all duration-200",
+                  "border-2",
+                  isMuted
+                    ? "border-border bg-muted/30 text-muted-foreground hover:border-primary/60 hover:bg-primary/10 hover:text-primary"
+                    : "border-primary/70 bg-primary/10 text-primary hover:bg-primary/20 shadow-[0_0_8px_rgba(var(--primary-rgb,99,102,241),0.35)]"
+                )}
+                title={isMuted ? "Unmute AI voice (ElevenLabs TTS)" : "Mute AI voice"}
+              >
+                {isMuted ? (
+                  <VolumeX className="w-4 h-4" />
+                ) : (
+                  <Volume2 className="w-4 h-4" />
+                )}
+              </Button>
+
+              {/* PDF Attach Button */}
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isLoading || isLoadingContext}
+                className={cn(
+                  "flex-shrink-0 h-10 w-10 rounded-xl transition-all duration-200",
+                  "border-2 border-border bg-muted/30 text-foreground",
+                  "hover:border-primary/60 hover:bg-primary/10 hover:text-primary",
+                  contextLabel?.startsWith("📄") && "border-primary/60 bg-primary/10 text-primary"
+                )}
+                title="Attach PDF document for AI context"
+              >
+                {isLoadingContext && !showYoutubeInput ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Paperclip className="w-4 h-4" />
+                )}
+              </Button>
+
+              {/* YouTube Button */}
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={() => { setShowYoutubeInput((v) => !v); setContextError(null) }}
+                disabled={isLoading || isLoadingContext}
+                className={cn(
+                  "flex-shrink-0 h-10 w-10 rounded-xl transition-all duration-200",
+                  "border-2 border-border bg-muted/30 text-foreground",
+                  "hover:border-red-400/60 hover:bg-red-500/10 hover:text-red-400",
+                  (showYoutubeInput || contextLabel?.startsWith("🎬")) && "border-red-400/60 bg-red-500/10 text-red-400"
+                )}
+                title="Paste YouTube video link for AI context"
+              >
+                {isLoadingContext && showYoutubeInput ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Youtube className="w-4 h-4" />
+                )}
+              </Button>
 
               {/* Text Input */}
               <div className="relative flex-1">
@@ -620,6 +1038,8 @@ export function AIAssistant() {
                   placeholder={
                     isListening
                       ? "🎙️ Listening... speak now"
+                      : contextLabel
+                      ? "Ask about the attached content..."
                       : "Ask anything — English, Hindi, Hinglish, Marathi..."
                   }
                   rows={1}
@@ -627,7 +1047,8 @@ export function AIAssistant() {
                   className={cn(
                     "resize-none min-h-[40px] max-h-[120px] pr-2 rounded-xl border-border/50 transition-all",
                     "focus:border-primary/50 focus:ring-1 focus:ring-primary/20",
-                    isListening && "border-red-400/50 bg-red-50/5"
+                    isListening && "border-red-400/50 bg-red-50/5",
+                    contextLabel && "border-primary/30"
                   )}
                   style={{ height: "auto" }}
                   onInput={(e) => {
@@ -655,14 +1076,25 @@ export function AIAssistant() {
             </div>
 
             {/* Keyboard hint */}
-            <p className="text-xs text-muted-foreground/60 mt-1.5 ml-1">
-              Press <kbd className="px-1.5 py-0.5 bg-muted rounded text-[10px] font-mono">Enter</kbd> to send ·{" "}
-              <kbd className="px-1.5 py-0.5 bg-muted rounded text-[10px] font-mono">Shift+Enter</kbd> for new line
-              {micSupported && " · 🎙️ Mic for voice input"}
+            <p className="text-xs text-muted-foreground/60 mt-1.5 ml-1 flex items-center gap-2 flex-wrap">
+              <span>
+                Press <kbd className="px-1.5 py-0.5 bg-muted rounded text-[10px] font-mono">Enter</kbd> to send ·{" "}
+                <kbd className="px-1.5 py-0.5 bg-muted rounded text-[10px] font-mono">Shift+Enter</kbd> for new line
+              </span>
+              <span>· <Mic className="w-3 h-3 inline mx-0.5" />Voice · <Volume2 className="w-3 h-3 inline mx-0.5" />AI Audio</span>
+              <span>·
+                <Paperclip className="w-3 h-3 inline mx-0.5" />PDF
+                · <Youtube className="w-3 h-3 inline mx-0.5" />YouTube context
+              </span>
             </p>
           </div>
         </CardContent>
       </Card>
+
+      {/* ── Live Voice Mode Overlay ──────────────────── */}
+      {showVoiceMode && (
+        <LiveVoiceMode onClose={() => setShowVoiceMode(false)} />
+      )}
     </div>
   )
 }
